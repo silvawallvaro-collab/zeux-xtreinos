@@ -305,7 +305,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
   <h2 class="title">Área do organizador</h2>
   <div id="adminLock" class="card" style="max-width:420px">
     <form id="adminForm">
-      <label>Usuário<input id="adminUser" autocomplete="username" required></label>
+      <label>E-mail do organizador principal ou usuário da equipe<input id="adminUser" autocomplete="username" required placeholder="E-mail ou usuário"></label>
       <label>Senha<input type="password" id="adminPass" autocomplete="current-password" required></label>
       <button class="btn" type="submit">Entrar</button>
     </form>
@@ -438,7 +438,8 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
    ===================================================== */
 const CONFIG = {
   firebaseApiKey: "AIzaSyDismx661GxCEk9JAbWFPLJ8LUXyDglUPw",
-  firebaseUrl: "https://zeus-xtreinos-default-rtdb.firebaseio.com",             // ex: "https://meuprojeto-default-rtdb.firebaseio.com"  (vazio = modo local)
+  firebaseUrl: "https://zeus-xtreinos-default-rtdb.firebaseio.com",
+  masterUid: "vGBF6P4NYmSachPXPwQb7wxfEtn2",
   pollMs: 4000,                // de quanto em quanto tempo atualizar (modo online)
   enforceRoster: true,         // exigir jogadores mínimos para inscrever (Squad 4, Duo 2, Solo 1)
   points: [12, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0]  // pontos por posição (1º ao 12º)
@@ -544,7 +545,7 @@ const DB = {
     if(!this.cloud||this.pending>0)return false;
     try{
       // Não lê a raiz inteira: cada coleção pública é consultada separadamente.
-      const branches=["users","teams","scrims","results","settings","news"];
+      const branches=["users","teams","scrims","results","settings","news","admins","logs"];
       let changed=false;
       for(const branch of branches){
         const r=await this.request(branch,"GET");
@@ -571,7 +572,7 @@ function adminSess(){
   try {
     const s = JSON.parse(session.get("xt_admin") || "null");
     if (!s || typeof s !== "object") return null;
-    if (s.role === "master") return s;
+    if (s.role === "master") return AUTH.user && AUTH.user.uid === CONFIG.masterUid ? s : null;
     const a = DB.get("admins/" + s.id);
     return a && a.active ? s : null;
   } catch(e){ return null; }
@@ -965,19 +966,35 @@ $("#joinForm").addEventListener("submit", async e => {
 /* ---------- organizador ---------- */
 $("#adminForm").addEventListener("submit", async e => {
   e.preventDefault();
-  const user = $("#adminUser").value.trim().toLowerCase(), pass = $("#adminPass").value;
-  await DB.pull(); let s = null;
-  if (user === "master"){ if (pass === CONFIG.adminPassword) s = { id: "master", user: "master", role: "master" }; }
-  else {
-    const a = arr(DB.get("admins")).find(x => x.user.toLowerCase() === user);
-    if (a && a.pass === hashPass(pass)){
+  const user = $("#adminUser").value.trim();
+  const pass = $("#adminPass").value;
+  let s = null;
+  if (user.includes("@")) {
+    try {
+      const account = await AUTH.login(user.toLowerCase(), pass);
+      if (account.localId !== CONFIG.masterUid) {
+        AUTH.signOut();
+        return toast("Esta conta não é a do organizador principal.", "err");
+      }
+      await DB.pull();
+      s = { id: "master", user: "master", role: "master" };
+    } catch(err) {
+      return toast(err.message || "E-mail ou senha incorretos.", "err");
+    }
+  } else {
+    await DB.pull();
+    const a = arr(DB.get("admins")).find(x => (x.user || "").toLowerCase() === user.toLowerCase());
+    if (a && a.pass === hashPass(pass)) {
       if (!a.active) return toast("Esse acesso está desativado. Fale com o organizador principal.", "err");
       s = { id: a.id, user: a.user, role: "org" };
     }
   }
   if (!s) return toast("Usuário ou senha incorretos", "err");
-  session.set("xt_admin", JSON.stringify(s)); $("#adminPass").value = "";
-  await logAct("Entrou no painel"); render();
+  session.set("xt_admin", JSON.stringify(s));
+  $("#adminPass").value = "";
+  await logAct(s.role === "master" ? "Entrou no painel principal" : "Entrou no painel");
+  toast("Acesso liberado ✅");
+  render();
 });
 $("#admForm").addEventListener("submit", async e => {
   e.preventDefault();
@@ -990,7 +1007,12 @@ $("#admForm").addEventListener("submit", async e => {
   await logAct("Criou o organizador " + user);
   e.target.reset(); toast("Acesso criado ✅"); render();
 });
-$("#adminOut").addEventListener("click", () => { session.del("xt_admin"); render(); });
+$("#adminOut").addEventListener("click", () => {
+  const wasMaster = isMaster();
+  session.del("xt_admin");
+  if (wasMaster) AUTH.signOut();
+  render();
+});
 $("#scrimForm").addEventListener("submit", async e => {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target)), id = uid();
