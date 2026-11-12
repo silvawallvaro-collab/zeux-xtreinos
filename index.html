@@ -379,7 +379,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
         <form id="admForm" class="mt">
           <div class="row">
             <label>Usuário<input name="user" required minlength="3" maxlength="20" autocomplete="off"></label>
-            <label>Senha (mín. 4)<input name="pass" type="password" required minlength="4" autocomplete="new-password"></label>
+            <label>Senha (mín. 6)<input name="pass" type="password" required minlength="6" autocomplete="new-password"></label>
           </div>
           <button class="btn" type="submit">Criar acesso</button>
         </form>
@@ -462,6 +462,8 @@ function hashPass(s){ // hash simples (cyrb53) — ver observação de seguranç
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
+// E-mail interno usado apenas pelo Firebase Authentication; nunca é exibido ao organizador.
+function organizerEmail(user){ return "org-" + hashPass(String(user).trim().toLowerCase()) + "@zeus-xtreinos.firebaseapp.com"; }
 function makeStore(getter){
   const mem = {};
   return {
@@ -573,6 +575,7 @@ function adminSess(){
     const s = JSON.parse(session.get("xt_admin") || "null");
     if (!s || typeof s !== "object") return null;
     if (s.role === "master") return AUTH.user && AUTH.user.uid === CONFIG.masterUid ? s : null;
+    if (!AUTH.user || AUTH.user.uid !== s.id) return null;
     const a = DB.get("admins/" + s.id);
     return a && a.active ? s : null;
   } catch(e){ return null; }
@@ -982,11 +985,22 @@ $("#adminForm").addEventListener("submit", async e => {
       return toast(err.message || "E-mail ou senha incorretos.", "err");
     }
   } else {
-    await DB.pull();
-    const a = arr(DB.get("admins")).find(x => (x.user || "").toLowerCase() === user.toLowerCase());
-    if (a && a.pass === hashPass(pass)) {
-      if (!a.active) return toast("Esse acesso está desativado. Fale com o organizador principal.", "err");
-      s = { id: a.id, user: a.user, role: "org" };
+    try {
+      const account = await AUTH.login(organizerEmail(user), pass);
+      await DB.pull();
+      const a = DB.get("admins/" + account.localId);
+      if (!a || (a.user || "").toLowerCase() !== user.toLowerCase()) {
+        AUTH.signOut();
+        return toast("Usuário ou senha incorretos.", "err");
+      }
+      if (!a.active) {
+        AUTH.signOut();
+        return toast("Esse acesso está desativado. Fale com o organizador principal.", "err");
+      }
+      s = { id: account.localId, user: a.user, role: "org" };
+    } catch(err) {
+      AUTH.signOut();
+      return toast("Usuário ou senha incorretos.", "err");
     }
   }
   if (!s) return toast("Usuário ou senha incorretos", "err");
@@ -1001,16 +1015,23 @@ $("#admForm").addEventListener("submit", async e => {
   if (!isMaster()) return toast("Só o organizador principal pode criar acessos", "err");
   const f = new FormData(e.target), user = f.get("user").trim(), pass = f.get("pass");
   if (user.length < 3) return toast("Usuário muito curto", "err");
-  if (user.toLowerCase() === "master" || arr(DB.get("admins")).some(x => x.user.toLowerCase() === user.toLowerCase())) return toast("Esse usuário já existe", "err");
-  const id = uid();
-  await DB.set("admins/" + id, { id, user, pass: hashPass(pass), active: true, created: Date.now() });
-  await logAct("Criou o organizador " + user);
-  e.target.reset(); toast("Acesso criado ✅"); render();
+  if (String(pass).length < 6) return toast("A senha precisa ter pelo menos 6 caracteres", "err");
+  if (user.toLowerCase() === "master" || arr(DB.get("admins")).some(x => (x.user || "").toLowerCase() === user.toLowerCase())) return toast("Esse usuário já existe", "err");
+  try {
+    // Cria a conta no Firebase sem trocar a sessão atual do organizador principal.
+    const account = await AUTH.request("accounts:signUp", { email: organizerEmail(user), password: pass, returnSecureToken: true });
+    const id = account.localId;
+    await DB.set("admins/" + id, { id, user, active: true, created: Date.now() });
+    await logAct("Criou o organizador " + user);
+    e.target.reset(); toast("Acesso criado ✅"); render();
+  } catch(err) {
+    const msg = (err.message || "").includes("EMAIL_EXISTS") ? "Não foi possível criar: tente outro usuário." : (err.message || "Falha ao criar o acesso.");
+    toast(msg, "err");
+  }
 });
 $("#adminOut").addEventListener("click", () => {
-  const wasMaster = isMaster();
   session.del("xt_admin");
-  if (wasMaster) AUTH.signOut();
+  AUTH.signOut();
   render();
 });
 $("#scrimForm").addEventListener("submit", async e => {
